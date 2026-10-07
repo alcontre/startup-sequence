@@ -381,11 +381,31 @@
         const control2X = lineEndX - (distanceX >= 0 ? Math.min(10, Math.max(6, distanceX / 4)) : 16);
         const path = svgElement("path", {
           d: `M ${startX} ${startY} C ${control1X} ${startY}, ${control2X} ${endY}, ${lineEndX} ${endY}`,
-          class: "dependency-line",
         });
-        path.append(svgElement("title", {}, `Precedent: ${sourceStep.label} (${sourceStep.id})`));
-        timeline.append(path);
-        endpointPorts.push({ sourceStep, targetStep, startX, startY, endX, endY });
+        const port = {
+          sourceStep,
+          targetStep,
+          startX,
+          startY,
+          endX,
+          endY,
+          pathData: path.getAttribute("d"),
+        };
+        const edge = svgElement("g", { class: "dependency-edge" });
+        const visibleLine = svgElement("path", { d: port.pathData, class: "dependency-line" });
+        visibleLine.append(svgElement("title", {}, `Precedent: ${sourceStep.label} (${sourceStep.id})`));
+        edge.append(visibleLine);
+        const hitArea = svgElement("path", {
+          d: port.pathData,
+          class: "dependency-hit-area",
+          "aria-hidden": "true",
+        });
+        hitArea.append(svgElement("title", {}, `Precedent: ${sourceStep.label} (${sourceStep.id})`));
+        edge.append(hitArea);
+        bindEdgeHighlight(edge, edge);
+        timeline.append(edge);
+        port.edge = edge;
+        endpointPorts.push(port);
       });
     }
 
@@ -418,8 +438,8 @@
       const arrowhead = svgElement("path", {
         d: `M ${port.endX} ${port.endY} L ${port.endX - ARROW_LENGTH} ${port.endY - 5} L ${port.endX - ARROW_LENGTH} ${port.endY + 5} Z`,
         class: "dependency-arrowhead",
-        "aria-hidden": "true",
       });
+      arrowhead.append(svgElement("title", {}, `Precedent: ${port.sourceStep.label} (${port.sourceStep.id})`));
       timeline.append(arrowhead);
       const base = svgElement("circle", {
         cx: port.startX,
@@ -452,6 +472,9 @@
           jumpToArrowEnd(arrowTip, port.endX, port.endY);
         }
       });
+      bindEdgeHighlight(base, port.edge);
+      bindEdgeHighlight(arrowhead, port.edge);
+      bindEdgeHighlight(arrowTip, port.edge);
     }
 
     timeline.setAttribute("width", chartRight);
@@ -463,6 +486,13 @@
     if (count <= 1) return height / 2;
     const inset = Math.min(8, height / (count + 1));
     return inset + (height - 2 * inset) * index / (count - 1);
+  }
+
+  function bindEdgeHighlight(element, edge) {
+    element.addEventListener("pointerenter", () => edge.classList.add("is-highlighted"));
+    element.addEventListener("pointerleave", () => edge.classList.remove("is-highlighted"));
+    element.addEventListener("focusin", () => edge.classList.add("is-highlighted"));
+    element.addEventListener("focusout", () => edge.classList.remove("is-highlighted"));
   }
 
   function jumpToArrowEnd(target, x, y) {
