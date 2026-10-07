@@ -200,33 +200,99 @@
     return source.lane !== target.lane || Math.abs(source.end - target.start) > 1e-9;
   }
 
-  // Route on an obstacle-boundary grid. Every segment stays outside card interiors.
-  function routeDependency(start, end, cards) {
-    const xs = [...new Set([start.x, end.x, ...cards.flatMap(c => [c.x - 3, c.x + c.width + 3])])].sort((a,b) => a-b);
-    const ys = [...new Set([start.y, end.y, ...cards.flatMap(c => [c.y - 6, c.y + c.height + 6])])].sort((a,b) => a-b);
-    const clear = (a,b) => !cards.some(c => a.x === b.x
-      ? a.x > c.x && a.x < c.x+c.width && Math.max(a.y,b.y)>c.y && Math.min(a.y,b.y)<c.y+c.height
-      : a.y > c.y && a.y < c.y+c.height && Math.max(a.x,b.x)>c.x && Math.min(a.x,b.x)<c.x+c.width);
-    const key = (x,y) => y*xs.length+x;
-    const first = key(xs.indexOf(start.x),ys.indexOf(start.y));
-    const last = key(xs.indexOf(end.x),ys.indexOf(end.y));
-    const queue = [first], previous = new Map([[first,null]]);
-    for (let i=0; i<queue.length && !previous.has(last); i++) {
-      const current=queue[i], x=current%xs.length, y=Math.floor(current/xs.length);
-      // Favor progress toward the destination, keeping routes deterministic.
-      const neighbors=[[x+1,y],[x,y+1],[x,y-1]].filter(([nx,ny]) => nx>=0 && nx<xs.length && ny>=0 && ny<ys.length)
-        .sort(([ax,ay],[bx,by]) => Math.abs(xs[ax]-end.x)+Math.abs(ys[ay]-end.y)-Math.abs(xs[bx]-end.x)-Math.abs(ys[by]-end.y));
-      for (const [nx,ny] of neighbors) {
-        const next=key(nx,ny);
-        if (!previous.has(next) && clear({x:xs[x],y:ys[y]},{x:xs[nx],y:ys[ny]})) { previous.set(next,current); queue.push(next); }
+  const ROUTE_TRACK_GAP = 1;
+
+  function routeSegments(points) {
+    return points.slice(1).map((end, index) => ({ start: points[index], end }));
+  }
+
+  function simplifyRoute(points) {
+    const result = [];
+    for (const point of points) {
+      const last = result.at(-1);
+      if (last && last.x === point.x && last.y === point.y) continue;
+      const before = result.at(-2);
+      if (before && ((before.x === last.x && last.x === point.x) ||
+        (before.y === last.y && last.y === point.y))) result.pop();
+      result.push(point);
+    }
+    return result;
+  }
+
+  // Consider simple forward routes together with the tracks already in use.
+  // Overlapping or tightly bundled segments cost more than passing behind a card.
+  function routeDependency(start, end, cards, { occupied = [], preferredFraction = 0.5, trackCount = 1 } = {}) {
+    if (end.x < start.x) throw new Error("Dependency endpoints must move forward in time.");
+    const width = end.x - start.x;
+    const lead = Math.min(2, width / 8);
+    const low = start.x + lead;
+    const high = end.x - lead;
+    const trackGap = Math.min(ROUTE_TRACK_GAP, (high - low) / Math.max(1, trackCount - 1));
+    const preferred = low + (high - low) * Math.max(0, Math.min(1, preferredFraction));
+    const tracks = new Set([preferred, low, high]);
+    for (let i = 1; i < 16; i += 1) tracks.add(low + (high - low) * i / 16);
+    for (const segment of occupied) {
+      if (segment.start.x === segment.end.x) {
+        for (const x of [segment.start.x - trackGap, segment.start.x + trackGap]) {
+          if (x >= low && x <= high) tracks.add(x);
+        }
       }
     }
-    if (!previous.has(last)) throw new Error("Cannot route dependency between card edges.");
-    const points=[];
-    for(let k=last; k!==null; k=previous.get(k)) points.push({x:xs[k%xs.length],y:ys[Math.floor(k/xs.length)]});
-    points.reverse();
-    return points.filter((p,i) => !i || i===points.length-1 ||
-      !((points[i-1].x===p.x && p.x===points[i+1].x) || (points[i-1].y===p.y && p.y===points[i+1].y)));
+    const candidates = [];
+    for (const x of tracks) candidates.push({
+      points: simplifyRoute([start, {x, y: start.y}, {x, y: end.y}, end]),
+      preference: Math.abs(x - preferred) * 0.1,
+    });
+    const corridors = new Set([start.y - 8, start.y + 8, end.y - 8, end.y + 8]);
+    for (const card of cards) {
+      if (card.x + card.width >= start.x && card.x <= end.x) {
+        corridors.add(card.y - 4);
+        corridors.add(card.y + card.height + 4);
+      }
+    }
+    for (const segment of occupied) {
+      if (segment.start.y === segment.end.y && segment.end.x > start.x && segment.start.x < end.x) {
+        corridors.add(segment.start.y - ROUTE_TRACK_GAP);
+        corridors.add(segment.start.y + ROUTE_TRACK_GAP);
+      }
+    }
+    for (const y of corridors) candidates.push({
+      points: simplifyRoute([start, {x:low, y:start.y}, {x:low, y}, {x:high, y}, {x:high, y:end.y}, end]),
+      preference: 0,
+    });
+    const overlap = (a, b, c, d) => Math.max(0, Math.min(Math.max(a,b), Math.max(c,d)) - Math.max(Math.min(a,b), Math.min(c,d)));
+    function score(candidate) {
+      let cost = candidate.preference + (candidate.points.length - 2) * 8;
+      for (const {start:a, end:b} of routeSegments(candidate.points)) {
+        const vertical = a.x === b.x;
+        cost += Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+        for (const card of cards) {
+          if (vertical && a.x > card.x && a.x < card.x + card.width) cost += 12 * overlap(a.y,b.y,card.y,card.y+card.height);
+          if (!vertical && a.y > card.y && a.y < card.y + card.height) cost += 12 * overlap(a.x,b.x,card.x,card.x+card.width);
+        }
+        for (const {start:c, end:d} of occupied) {
+          const otherVertical = c.x === d.x;
+          if (vertical === otherVertical) {
+            const separation = Math.abs(vertical ? a.x-c.x : a.y-c.y);
+            if (separation < trackGap) {
+              const shared = vertical ? overlap(a.y,b.y,c.y,d.y) : overlap(a.x,b.x,c.x,d.x);
+              cost += shared * (trackGap-separation) * 40;
+            }
+          } else {
+            const v = vertical ? {a,b} : {a:c,b:d};
+            const h = vertical ? {a:c,b:d} : {a,b};
+            if (v.a.x > h.a.x && v.a.x < h.b.x && h.a.y > Math.min(v.a.y,v.b.y) && h.a.y < Math.max(v.a.y,v.b.y)) cost += 24;
+          }
+        }
+      }
+      return cost;
+    }
+    let best = candidates[0], bestScore = Infinity;
+    for (const candidate of candidates) {
+      const candidateScore = score(candidate);
+      if (candidateScore < bestScore) { best = candidate; bestScore = candidateScore; }
+    }
+    return best.points;
   }
 
   function roundedRoute(points, radius = 3) {
@@ -378,6 +444,20 @@
     for (const step of scheduled) {
       for (const precedent of step.precedents) outgoing.get(precedent).push(step.id);
     }
+    const stepsById = new Map(scheduled.map(step => [step.id, step]));
+    const boundaryConnections = new Map();
+    for (const target of scheduled) {
+      for (const id of target.precedents) {
+        const source = stepsById.get(id);
+        if (shouldDrawDependency(source, target) && Math.abs(source.end - target.start) < 1e-9) {
+          boundaryConnections.set(target.start, (boundaryConnections.get(target.start) || 0) + 1);
+        }
+      }
+    }
+    const boundaryInset = (time, duration) => Math.min(
+      3 + Math.max(0, (boundaryConnections.get(time) || 1) - 1) * ROUTE_TRACK_GAP / 2,
+      duration * scale / 4,
+    );
     const cardHeights = new Map(scheduled.map((step) => [
       step.id,
       Math.max(43, 18 + (Math.max(step.precedents.length, outgoing.get(step.id).length, 1) - 1) * 10),
@@ -401,9 +481,10 @@
       rowItems.forEach((items, row) => {
         const rowHeight = rowHeights[row];
         for (const step of items) {
-          const inset = proportional ? Math.min(3, step.duration * scale / 4) : 0;
-          const x = left + step.start * scale + inset;
-          const width = proportional ? step.duration * scale - 2 * inset : fixedWidth;
+          const startInset = proportional ? boundaryInset(step.start, step.duration) : 0;
+          const endInset = proportional ? boundaryInset(step.end, step.duration) : 0;
+          const x = left + step.start * scale + startInset;
+          const width = proportional ? step.duration * scale - startInset - endInset : fixedWidth;
           const cardHeight = cardHeights.get(step.id);
           cardPositions.set(step.id, {
             x,
@@ -469,6 +550,7 @@
     const endpointPorts = [];
     const backgroundEdges = svgElement("g", { class: "dependency-background" });
     const foregroundEdges = svgElement("g", { class: "dependency-foreground" });
+    const occupied = [];
     timeline.append(backgroundEdges);
     for (const targetStep of scheduled) {
       const targetPosition = cardPositions.get(targetStep.id);
@@ -487,15 +569,16 @@
         const obstacles = [...cardPositions.entries()]
           .filter(([id]) => !endOnRight || id !== targetStep.id)
           .map(([, position]) => position);
-        let routed;
-        try {
-          routed = routeDependency({x:startX+offset,y:startY}, {x:endX-offset,y:endY}, obstacles);
-        } catch (error) {
-          // A card can seal every forward corridor. Keep the route moving forward
-          // and let that card cover the line until the connection is highlighted.
-          routed = routeDependency({x:startX+offset,y:startY}, {x:endX-offset,y:endY}, []);
-        }
+        const fractions = [];
+        if (sourceTargets.length > 1) fractions.push(sourceIndex / (sourceTargets.length - 1));
+        if (sources.length > 1) fractions.push(targetIndex / (sources.length - 1));
+        const rank = fractions.length ? fractions.reduce((sum, value) => sum + value, 0) / fractions.length : 0.5;
+        // Nest fan-out and fan-in tracks in endpoint order to reduce crossings.
+        const preferredFraction = endY >= startY ? 1 - rank : rank;
+        const routed = routeDependency({x:startX+offset,y:startY}, {x:endX-offset,y:endY}, obstacles,
+          { occupied, preferredFraction, trackCount: Math.max(sourceTargets.length, sources.length) });
         const points = [{x:startX,y:startY}, ...routed, {x:endX,y:endY}];
+        occupied.push(...routeSegments(points));
         const pathData = roundedRoute(points);
         const port = {
           sourceStep,
@@ -681,7 +764,7 @@
     const centerOffset = scroller.clientWidth / 2 - 126;
     const focusedTime = Math.max(0, (scroller.scrollLeft + centerOffset) / previousScale);
     const roundedPercent = fit ? Math.floor(percent / 5) * 5 : Math.round(percent / 5) * 5;
-    zoomPercent = Math.min(250, Math.max(5, roundedPercent));
+    zoomPercent = Math.min(1000, Math.max(5, roundedPercent));
     $("#zoom-level").value = String(zoomPercent);
     $("#zoom-value").textContent = `${zoomPercent}%`;
     render();
@@ -751,8 +834,8 @@
     render();
   });
   $("#zoom-level").addEventListener("input", (event) => setZoom(Number(event.target.value)));
-  $("#zoom-in").addEventListener("click", () => setZoom(zoomPercent + 15));
-  $("#zoom-out").addEventListener("click", () => setZoom(zoomPercent - 15));
+  $("#zoom-in").addEventListener("click", () => setZoom(zoomPercent * 1.2));
+  $("#zoom-out").addEventListener("click", () => setZoom(zoomPercent / 1.2));
   $("#fit-timeline").addEventListener("click", () => {
     const result = normalizeSteps(steps);
     if (result.errors.length) return;

@@ -179,7 +179,7 @@ h2 { margin-bottom: 0; font-size: 18px; letter-spacing: -0.025em; }
 .dependency-foreground-line { fill: none; stroke: #0d655e; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; opacity: 0; pointer-events: none; }
 .dependency-foreground-line.is-highlighted { opacity: 1; }
 .dependency-edge { --edge-color: #91a8a7; }
-.dependency-hit-area { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
+.dependency-hit-area { fill: none; stroke: transparent; stroke-width: 1; pointer-events: stroke; cursor: pointer; }
 .dependency-source-port, .dependency-destination-port { fill: #fff; stroke: #668f89; stroke-width: 1.5; cursor: pointer; }
 .dependency-destination-port { fill: #d8eee9; }
 .dependency-source-port:hover, .dependency-source-port:focus,

@@ -126,6 +126,24 @@ test("rounds bends while preserving the route endpoints", () => {
     "M 0 0 L 0.5 0 Q 1 0 1 0.5 L 1 20");
 });
 
+test("fan-out routes reserve separate forward tracks", () => {
+  const { routeDependency } = require("./app.js");
+  const occupied = [];
+  const trunks = [];
+  for (let index = 0; index < 5; index += 1) {
+    const route = routeDependency({x:0,y:8+index*10}, {x:8,y:100+index*80}, [], {
+      occupied, preferredFraction: 1-index/4,
+    });
+    const segments = route.slice(1).map((end,i) => ({start:route[i],end}));
+    const trunk = segments.filter(s => s.start.x === s.end.x)
+      .sort((a,b) => Math.abs(b.end.y-b.start.y)-Math.abs(a.end.y-a.start.y))[0];
+    trunks.push(trunk.start.x);
+    occupied.push(...segments);
+    assert.ok(route.every((point,i) => !i || point.x >= route[i-1].x));
+  }
+  for (let i=1; i<trunks.length; i++) assert.ok(trunks[i-1]-trunks[i] >= 1, "parallel routes need distinct, ordered tracks");
+});
+
 test("renders the complete sample in both modes across zoom levels", () => {
   const vm = require("node:vm");
   const fs = require("node:fs");
@@ -158,6 +176,22 @@ test("renders the complete sample in both modes across zoom levels", () => {
       const paths=descendants(svg).filter(c => c.attributes.class === "dependency-line");
       assert.ok(paths.length>0);
       assert.ok(paths.every(p => !/NaN|Infinity/.test(p.attributes.d)));
+      if (mode === "#proportional-view") {
+        const fanout = paths.filter(p => p.children.some(c => c.textContent.includes("(power-good)")));
+        const trunks = fanout.map(path => {
+          const commands = path.attributes.d.match(/[MLQ][^MLQ]+/g);
+          let previous;
+          const segments = [];
+          for (const command of commands) {
+            const numbers = command.slice(1).trim().split(/\s+/).map(Number);
+            const end = {x:numbers.at(-2), y:numbers.at(-1)};
+            if (command[0] === "L" && previous && end.x === previous.x) segments.push({x:end.x,length:Math.abs(end.y-previous.y)});
+            previous = end;
+          }
+          return segments.sort((a,b) => b.length-a.length)[0].x;
+        }).sort((a,b) => a-b);
+        for (let i=1; i<trunks.length; i++) assert.ok(trunks[i]-trunks[i-1] >= (zoom >= 100 ? 1 - 1e-8 : 0.01), `power-step fan-out must remain on separate tracks at ${zoom}%: ${trunks.join(", ")}`);
+      }
       const firstCard = svg.children.flatMap(c => c.children).find(c => c.attributes.class === "step-card");
       const firstPorts = paths.filter(p => p.children.some(c => c.textContent.includes("(power-good)")))
         .map(p => Number(p.attributes.d.split(" ")[2])).sort((a,b) => a-b);
