@@ -176,6 +176,7 @@ h2 { margin-bottom: 0; font-size: 18px; letter-spacing: -0.025em; }
 .step-card-text { fill: #203b42; font: 600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .step-id-text { fill: #648079; font: 9px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .dependency-line { fill: none; stroke: #91a8a7; stroke-width: 1.4; }
+.dependency-arrowhead { fill: #91a8a7; pointer-events: none; }
 .dependency-source-port { fill: #fff; stroke: #668f89; stroke-width: 1.5; cursor: help; }
 .dependency-source-port:hover, .dependency-source-port:focus { fill: #d8eee9; stroke: #117c73; stroke-width: 2; outline: none; }
 .dependency-target-hit { fill: transparent; cursor: help; }

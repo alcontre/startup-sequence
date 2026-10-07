@@ -2,6 +2,7 @@
   "use strict";
 
   const CSV_COLUMNS = ["id", "lane", "label", "duration", "precedents"];
+  const ARROW_LENGTH = 9;
   const COLORS = [
     ["#e5f3f0", "#8fc6b9"],
     ["#fff0dc", "#efc185"],
@@ -358,14 +359,6 @@
       timeline.append(laneText);
     });
 
-    const defs = svgElement("defs");
-    const marker = svgElement("marker", {
-      id: "arrowhead", markerWidth: 7, markerHeight: 7, refX: 6, refY: 3.5, orient: "auto",
-    });
-    marker.append(svgElement("path", { d: "M 0 0 L 7 3.5 L 0 7 z", fill: "#91a8a7" }));
-    defs.append(marker);
-    timeline.prepend(defs);
-
     const dependentOrder = new Map(scheduled.map((step, index) => [step.id, index]));
     const endpointPorts = [];
     for (const targetStep of scheduled) {
@@ -380,11 +373,15 @@
         const startY = sourcePosition.y + spreadPort(sourceIndex, sourceTargets.length, sourcePosition.height);
         const endX = targetPosition.x;
         const endY = targetPosition.y + spreadPort(targetIndex, sources.length, targetPosition.height);
-        const bendX = Math.max(startX + 12, (startX + endX) / 2);
+        const lineEndX = endX - ARROW_LENGTH;
+        const distanceX = lineEndX - startX;
+        const control1X = distanceX >= 0
+          ? startX + Math.max(12, distanceX / 2)
+          : startX + Math.max(60, Math.abs(distanceX) * 1.5);
+        const control2X = lineEndX - (distanceX >= 0 ? Math.min(10, Math.max(6, distanceX / 4)) : 16);
         const path = svgElement("path", {
-          d: `M ${startX} ${startY} C ${bendX} ${startY}, ${bendX} ${endY}, ${endX} ${endY}`,
+          d: `M ${startX} ${startY} C ${control1X} ${startY}, ${control2X} ${endY}, ${lineEndX} ${endY}`,
           class: "dependency-line",
-          "marker-end": "url(#arrowhead)",
         });
         path.append(svgElement("title", {}, `Precedent: ${sourceStep.label} (${sourceStep.id})`));
         timeline.append(path);
@@ -418,6 +415,12 @@
     }
 
     for (const port of endpointPorts) {
+      const arrowhead = svgElement("path", {
+        d: `M ${port.endX} ${port.endY} L ${port.endX - ARROW_LENGTH} ${port.endY - 5} L ${port.endX - ARROW_LENGTH} ${port.endY + 5} Z`,
+        class: "dependency-arrowhead",
+        "aria-hidden": "true",
+      });
+      timeline.append(arrowhead);
       const base = svgElement("circle", {
         cx: port.startX,
         cy: port.startY,
