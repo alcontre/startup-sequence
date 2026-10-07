@@ -83,19 +83,18 @@ test("reports malformed CSV header and unclosed quoted fields", () => {
   assert.match(parseCsv("id,id,lane,label,duration,precedents").errors.join(" "), /duplicate column/);
 });
 
-test("equal-width rows pack visible cards without overlap at every zoom", () => {
-  const { assignRows } = require("./app.js");
-  const items = normalizeSteps(sampleSteps).steps;
-  for (const scale of [2.6, 52, 130]) {
-    for (const lane of new Set(items.map(s => s.lane))) {
-      const placed = assignRows(items.filter(s => s.lane === lane), scale, false);
-      for (const {step, row} of placed) {
-        for (const other of placed.filter(p => p.row === row && p.step.start > step.start)) {
-          assert.ok(step.start*scale+148 <= other.step.start*scale);
-        }
-      }
-    }
-  }
+test("flow stages follow dependencies regardless of duration", () => {
+  const { flowStages } = require("./app.js");
+  const sequence = [
+    {id:"root",lane:"A",label:"Root",duration:100,precedents:[]},
+    {id:"parallel",lane:"B",label:"Parallel",duration:0.1,precedents:[]},
+    {id:"child",lane:"A",label:"Child",duration:3,precedents:["root"]},
+    {id:"join",lane:"B",label:"Join",duration:1,precedents:["child","parallel"]},
+  ];
+  const before = flowStages(normalizeSteps(sequence).steps);
+  const after = flowStages(normalizeSteps(sequence.map(step => ({...step,duration:step.duration*10}))).steps);
+  assert.deepEqual([...before], [["root",0],["parallel",0],["child",1],["join",2]]);
+  assert.deepEqual([...after], [...before]);
 });
 
 test("routes around intervening cards and handles aligned endpoints", () => {
@@ -144,7 +143,7 @@ test("fan-out routes reserve separate forward tracks", () => {
   for (let i=1; i<trunks.length; i++) assert.ok(trunks[i-1]-trunks[i] >= 1, "parallel routes need distinct, ordered tracks");
 });
 
-test("renders the complete sample in both modes across zoom levels", () => {
+test("renders the complete sample in timeline and flow views", () => {
   const vm = require("node:vm");
   const fs = require("node:fs");
   class Element {
@@ -176,6 +175,18 @@ test("renders the complete sample in both modes across zoom levels", () => {
       const paths=descendants(svg).filter(c => c.attributes.class === "dependency-line");
       assert.ok(paths.length>0);
       assert.ok(paths.every(p => !/NaN|Infinity/.test(p.attributes.d)));
+      if (mode === "#sequence-view") {
+        assert.equal(elements.get(".zoom-controls").hidden, true);
+        assert.equal(paths.length, sampleSteps.reduce((count,step) => count+step.precedents.length,0));
+        assert.equal(descendants(svg).filter(c => c.attributes.class === "tick-line").length,0);
+        assert.ok(descendants(svg).some(c => c.textContent === "DEPENDENCY FLOW →"));
+        const cards=svg.children.filter(c => c.children.some(child => child.attributes.class === "step-card"));
+        assert.ok(new Set(cards.map(c => c.children.find(child => child.attributes.class === "step-card").attributes.width)).size > 1);
+        assert.deepEqual(cards.map(c => c.children.find(child => child.attributes.class === "step-card-text").textContent), sampleSteps.map(step => step.label));
+      } else {
+        assert.equal(elements.get(".zoom-controls").hidden, false);
+        assert.ok(descendants(svg).some(c => c.textContent === "TIME (s) →"));
+      }
       if (mode === "#proportional-view") {
         const fanout = paths.filter(p => p.children.some(c => c.textContent.includes("(power-good)")));
         const trunks = fanout.map(path => {

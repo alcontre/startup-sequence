@@ -321,18 +321,23 @@
     return commands.join(" ");
   }
 
-  function assignRows(items, scale, proportional, fixedWidth = 148) {
-    const ends=[];
-    return [...items].sort((a,b) => a.start-b.start || a.index-b.index).map(step => {
-      const x=step.start*scale;
-      let row=ends.findIndex(end => end <= x+1e-9);
-      if(row<0) row=ends.length;
-      ends[row]=proportional ? step.end*scale : x+fixedWidth+10;
-      return {step,row};
-    });
+  function flowStages(steps) {
+    const byId = new Map(steps.map(step => [step.id, step]));
+    const stages = new Map();
+    function stageOf(id) {
+      if (stages.has(id)) return stages.get(id);
+      const step = byId.get(id);
+      const stage = step.precedents.length
+        ? 1 + Math.max(...step.precedents.map(stageOf))
+        : 0;
+      stages.set(id, stage);
+      return stage;
+    }
+    for (const step of steps) stageOf(step.id);
+    return stages;
   }
 
-  const api = { normalizeSteps, parseCsv, toCsv, shouldDrawDependency, assignRows, routeDependency, roundedRoute, sampleSteps: SAMPLE_STEPS };
+  const api = { normalizeSteps, parseCsv, toCsv, shouldDrawDependency, flowStages, routeDependency, roundedRoute, sampleSteps: SAMPLE_STEPS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   global.StartupSequence = api;
 
@@ -432,11 +437,30 @@
     const axisHeight = 35;
     const left = 126;
     const scale = baseScale * zoomPercent / 100;
-    const fixedWidth = 148;
+    const stages = proportional ? null : flowStages(scheduled);
+    const measure = document.createElement("canvas").getContext?.("2d");
+    if (measure) measure.font = '600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    const labelWidth = (value) => measure ? measure.measureText(value).width : value.length * 6.5;
+    const flowWidths = new Map();
+    const columnWidths = [];
+    if (stages) {
+      for (const step of scheduled) {
+        const width = Math.max(76, Math.ceil(Math.max(labelWidth(step.label), labelWidth(step.id)) + 24));
+        flowWidths.set(step.id, width);
+        const stage = stages.get(step.id);
+        columnWidths[stage] = Math.max(columnWidths[stage] || 0, width);
+      }
+    }
+    const columnXs = [];
+    let flowRight = left;
+    for (const width of columnWidths) {
+      columnXs.push(flowRight);
+      flowRight += width + 64;
+    }
     const maxTime = Math.max(...scheduled.map((step) => step.end), 0);
     const chartRight = Math.max(
       $(".diagram-scroll").clientWidth,
-      left + maxTime * scale + (proportional ? 80 : fixedWidth + 20),
+      proportional ? left + maxTime * scale + 80 : flowRight + 16,
     );
     const laneRows = new Map();
     const cardPositions = new Map();
@@ -460,16 +484,25 @@
     );
     const cardHeights = new Map(scheduled.map((step) => [
       step.id,
-      Math.max(43, 18 + (Math.max(step.precedents.length, outgoing.get(step.id).length, 1) - 1) * 10),
+      Math.max(proportional ? 43 : 52, 18 + (Math.max(step.precedents.length, outgoing.get(step.id).length, 1) - 1) * 10),
     ]));
     let nextY = laneTop;
 
     for (const lane of lanes) {
       const laneSteps = scheduled
         .filter((step) => step.lane === lane)
-        .sort((a, b) => a.start - b.start || a.index - b.index);
+        .sort((a, b) => proportional
+          ? a.start - b.start || a.index - b.index
+          : stages.get(a.id) - stages.get(b.id) || a.index - b.index);
       const rowItems = [];
-      for (const {step, row} of assignRows(laneSteps, scale, proportional, fixedWidth)) {
+      const rowEnds = [];
+      for (const step of laneSteps) {
+        const stage = stages?.get(step.id);
+        const x = proportional ? step.start * scale : columnXs[stage] + (columnWidths[stage] - flowWidths.get(step.id)) / 2;
+        const width = proportional ? step.duration * scale : flowWidths.get(step.id);
+        let row = rowEnds.findIndex(end => end <= x);
+        if (row < 0) row = rowEnds.length;
+        rowEnds[row] = x + width + (proportional ? 0 : 14);
         if (!rowItems[row]) rowItems[row] = [];
         rowItems[row].push(step);
       }
@@ -483,8 +516,11 @@
         for (const step of items) {
           const startInset = proportional ? boundaryInset(step.start, step.duration) : 0;
           const endInset = proportional ? boundaryInset(step.end, step.duration) : 0;
-          const x = left + step.start * scale + startInset;
-          const width = proportional ? step.duration * scale - startInset - endInset : fixedWidth;
+          const stage = stages?.get(step.id);
+          const x = proportional
+            ? left + step.start * scale + startInset
+            : columnXs[stage] + (columnWidths[stage] - flowWidths.get(step.id)) / 2;
+          const width = proportional ? step.duration * scale - startInset - endInset : flowWidths.get(step.id);
           const cardHeight = cardHeights.get(step.id);
           cardPositions.set(step.id, {
             x,
@@ -504,17 +540,23 @@
     timeline.append(defs);
     const axis = svgElement("g");
     axis.append(svgElement("text", { x: 18, y: 22, class: "axis-label" }, "COMPONENT"));
-    axis.append(svgElement("text", { x: left, y: 22, class: "axis-label" }, "TIME (s) →"));
+    axis.append(svgElement("text", { x: left, y: 22, class: "axis-label" }, proportional ? "TIME (s) →" : "DEPENDENCY FLOW →"));
     axis.append(svgElement("line", { x1: left, y1: axisHeight, x2: chartRight, y2: axisHeight, class: "axis-rule" }));
-    const tickStep = chooseTickStep(scale);
-    for (let time = 0; time <= maxTime; time += tickStep) {
-      const x = left + time * scale;
-      axis.append(svgElement("line", { x1: x, y1: axisHeight, x2: x, y2: nextY, class: "tick-line" }));
-      axis.append(svgElement("text", { x, y: 34, class: "tick-label", "text-anchor": "middle" }, formatNumber(time)));
-    }
-    if (maxTime === 0 || maxTime % tickStep !== 0) {
-      const x = left + maxTime * scale;
-      axis.append(svgElement("text", { x, y: 34, class: "tick-label", "text-anchor": "middle" }, formatNumber(maxTime)));
+    if (proportional) {
+      const tickStep = chooseTickStep(scale);
+      for (let time = 0; time <= maxTime; time += tickStep) {
+        const x = left + time * scale;
+        axis.append(svgElement("line", { x1: x, y1: axisHeight, x2: x, y2: nextY, class: "tick-line" }));
+        axis.append(svgElement("text", { x, y: 34, class: "tick-label", "text-anchor": "middle" }, formatNumber(time)));
+      }
+      if (maxTime === 0 || maxTime % tickStep !== 0) {
+        const x = left + maxTime * scale;
+        axis.append(svgElement("text", { x, y: 34, class: "tick-label", "text-anchor": "middle" }, formatNumber(maxTime)));
+      }
+    } else {
+      columnXs.forEach((x, stage) => axis.append(svgElement("text", {
+        x: x + columnWidths[stage] / 2, y: 34, class: "tick-label", "text-anchor": "middle",
+      }, `Stage ${stage + 1}`)));
     }
 
     lanes.forEach((lane, index) => {
@@ -536,7 +578,7 @@
     for (const target of scheduled) {
       for (const sourceId of target.precedents) {
         const source = byId.get(sourceId);
-        if (!shouldDrawDependency(source, target) && cardPositions.get(sourceId).row === cardPositions.get(target.id).row) continue;
+        if (proportional && !shouldDrawDependency(source, target) && cardPositions.get(sourceId).row === cardPositions.get(target.id).row) continue;
         visibleSources.get(target.id).push(sourceId);
         visibleTargets.get(sourceId).push(target.id);
       }
@@ -562,13 +604,10 @@
         const sourceIndex = sourceTargets.indexOf(targetStep.id);
         const startX = sourcePosition.x + sourcePosition.width;
         const startY = sourcePosition.y + spreadPort(sourceIndex, sourceTargets.length, sourcePosition.height);
-        const endOnRight = !proportional && sourcePosition.x + sourcePosition.width >= targetPosition.x;
-        const endX = targetPosition.x + (endOnRight ? targetPosition.width : 0);
+        const endX = targetPosition.x;
         const endY = targetPosition.y + spreadPort(targetIndex, sources.length, targetPosition.height);
         const offset = Math.min(1, (endX - startX) / 3);
-        const obstacles = [...cardPositions.entries()]
-          .filter(([id]) => !endOnRight || id !== targetStep.id)
-          .map(([, position]) => position);
+        const obstacles = [...cardPositions.values()];
         const fractions = [];
         if (sourceTargets.length > 1) fractions.push(sourceIndex / (sourceTargets.length - 1));
         if (sources.length > 1) fractions.push(targetIndex / (sources.length - 1));
@@ -587,7 +626,6 @@
           startY,
           endX,
           endY,
-          endOnRight,
           pathData,
         };
         const edge = svgElement("g", { class: "dependency-edge" });
@@ -616,7 +654,9 @@
       const position = cardPositions.get(step.id);
       const [fill, stroke] = laneColors.get(step.lane);
       const group = svgElement("g");
-      group.append(svgElement("title", {}, `${step.label} (${step.id}) · ${formatNumber(step.start)}–${formatNumber(step.end)} s · duration ${formatNumber(step.duration)} seconds`));
+      group.append(svgElement("title", {}, proportional
+        ? `${step.label} (${step.id}) · ${formatNumber(step.start)}–${formatNumber(step.end)} s · duration ${formatNumber(step.duration)} seconds`
+        : `${step.label} (${step.id}) · ${step.lane}`));
       const clipId = `card-label-${step.index}`;
       const clip = svgElement("clipPath", {id: clipId});
       clip.append(svgElement("rect", {x: position.x + 6, y: position.y, width: Math.max(0,position.width-12), height: position.height}));
@@ -625,18 +665,20 @@
         x: position.x, y: position.y, width: position.width, height: position.height,
         rx: 5, fill, stroke, class: "step-card",
       });
-      rect.append(svgElement("title", {}, `${step.label} (${step.id}) · ${formatNumber(step.duration)} seconds`));
+      rect.append(svgElement("title", {}, proportional
+        ? `${step.label} (${step.id}) · ${formatNumber(step.duration)} seconds`
+        : `${step.label} (${step.id}) · ${step.lane}`));
       group.append(rect);
       const label = svgElement("text", {
         x: position.x + 9,
         y: position.y + position.height / 2 + (position.height > 43 ? -2 : 4),
         class: "step-card-text", "clip-path": `url(#${clipId})`,
-      }, truncate(step.label, proportional ? Math.floor(position.width / 7) : 19));
+      }, proportional ? truncate(step.label, Math.floor(position.width / 7)) : step.label);
       group.append(label);
       if (position.width > 58 && position.height > 43) {
         group.append(svgElement("text", {
           x: position.x + 9, y: position.y + position.height / 2 + 13, class: "step-id-text", "clip-path": `url(#${clipId})`,
-        }, truncate(step.id, Math.floor((position.width - 18) / 5.5))));
+        }, proportional ? truncate(step.id, Math.floor((position.width - 18) / 5.5)) : step.id));
       }
       timeline.append(group);
     }
@@ -650,7 +692,7 @@
       const targetRadius = Math.min(4.5, targetPosition.width / 2, targetPosition.height / 2);
       const base = endpointPort(port.startX, port.startY, sourceRadius, "source",
         `Next step: ${port.targetStep.label} (${port.targetStep.id})`);
-      const tip = endpointPort(port.endX, port.endY, targetRadius, port.endOnRight ? "destination-right" : "destination-left",
+      const tip = endpointPort(port.endX, port.endY, targetRadius, "destination-left",
         `Precedent: ${port.sourceStep.label} (${port.sourceStep.id})`);
       linkEndpoint(base, tip, port.endX, port.endY, port.edge);
       linkEndpoint(tip, base, port.startX, port.startY, port.edge);
@@ -744,7 +786,9 @@
     const scheduled = result.steps;
     renderRows(scheduled);
     $("#empty-diagram").hidden = scheduled.length > 0;
-    $("#total-time").textContent = `Critical path · ${formatNumber(Math.max(0, ...scheduled.map((step) => step.end)))} seconds`;
+    $("#total-time").textContent = proportional
+      ? `Critical path · ${formatNumber(Math.max(0, ...scheduled.map((step) => step.end)))} seconds`
+      : `${scheduled.length} steps · ${Math.max(-1, ...flowStages(scheduled).values()) + 1} stages`;
     renderDiagram(scheduled);
   }
 
@@ -823,14 +867,24 @@
     proportional = true;
     $("#proportional-view").setAttribute("aria-pressed", "true");
     $("#sequence-view").setAttribute("aria-pressed", "false");
+    $(".zoom-controls").hidden = false;
+    $("#diagram-title").textContent = "Startup timeline";
+    $("#timeline").setAttribute("aria-label", "Startup steps arranged by component and time");
+    $(".diagram-scroll").setAttribute("aria-label", "Scrollable startup timeline");
     $("#view-description").textContent = "Block widths represent duration. Time runs left to right.";
+    $(".diagram-scroll").scrollLeft = 0;
     render();
   });
   $("#sequence-view").addEventListener("click", () => {
     proportional = false;
     $("#proportional-view").setAttribute("aria-pressed", "false");
     $("#sequence-view").setAttribute("aria-pressed", "true");
-    $("#view-description").textContent = "Equal-width blocks at scheduled start times; overlapping cards use separate rows.";
+    $(".zoom-controls").hidden = true;
+    $("#diagram-title").textContent = "Startup flow";
+    $("#timeline").setAttribute("aria-label", "Startup steps arranged by dependency stage and component");
+    $(".diagram-scroll").setAttribute("aria-label", "Scrollable startup flow diagram");
+    $("#view-description").textContent = "Boxes follow dependencies. Their position and width do not represent time.";
+    $(".diagram-scroll").scrollLeft = 0;
     render();
   });
   $("#zoom-level").addEventListener("input", (event) => setZoom(Number(event.target.value)));

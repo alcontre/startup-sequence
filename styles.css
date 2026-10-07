@@ -104,6 +104,7 @@ h1 { margin-bottom: 7px; font-size: clamp(31px, 4vw, 42px); letter-spacing: -0.0
 .view-description { flex: 1; min-width: 150px; }
 .total-time { color: var(--teal-dark); font-weight: 700; white-space: nowrap; }
 .zoom-controls { display: flex; align-items: center; gap: 6px; }
+.zoom-controls[hidden] { display: none; }
 .zoom-controls .toolbar-label { margin-right: 2px; }
 .zoom-button, .fit-button {
   display: inline-grid;
