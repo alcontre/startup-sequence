@@ -51,7 +51,7 @@
             <p class="eyebrow">DEPENDENCY MAP</p>
             <h2 id="diagram-title">Startup timeline</h2>
           </div>
-          <p class="panel-hint">Hover an arrowhead for its prerequisite; hover its source dot for the next step.</p>
+          <p class="panel-hint">Hover either connector for the linked step. Click it to jump to the other end.</p>
         </div>
         <div id="messages" class="messages" role="status" aria-live="polite" hidden></div>
         <div class="diagram-scroll" tabindex="0" aria-label="Scrollable startup timeline">
@@ -76,7 +76,7 @@
         <form id="step-form" class="step-form">
           <div class="form-heading">
             <h3 id="form-title">Add a step</h3>
-            <p>Use a consistent time unit for every duration.</p>
+            <p>Enter durations in seconds.</p>
           </div>
           <div class="form-grid">
             <label>
@@ -92,7 +92,7 @@
               <input id="step-label" name="label" required autocomplete="off" placeholder="Initialize boot firmware">
             </label>
             <label>
-              <span>Duration</span>
+              <span>Duration (seconds)</span>
               <input id="step-duration" name="duration" type="number" min="0.001" step="any" required placeholder="2.5">
             </label>
             <label class="label-wide">
@@ -112,7 +112,7 @@
               <tr>
                 <th scope="col">Step</th>
                 <th scope="col">Component</th>
-                <th scope="col">Duration</th>
+                <th scope="col">Duration (s)</th>
                 <th scope="col">Precedents</th>
                 <th scope="col"><span class="visually-hidden">Actions</span></th>
               </tr>

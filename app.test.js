@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeSteps, parseCsv, toCsv, sampleSteps } = require("./app.js");
+const { normalizeSteps, parseCsv, toCsv, shouldDrawDependency, sampleSteps } = require("./app.js");
 
 test("schedules parallel work at earliest dependency completion", () => {
   const result = normalizeSteps([
@@ -19,6 +19,21 @@ test("schedules parallel work at earliest dependency completion", () => {
     ["files", 2, 6],
     ["decrypt", 6, 7],
   ]);
+});
+
+test("suppresses arrows for sequential steps in the same swimlane", () => {
+  assert.equal(shouldDrawDependency(
+    { lane: "CPU 0", end: 4 },
+    { lane: "CPU 0", start: 4 },
+  ), false);
+  assert.equal(shouldDrawDependency(
+    { lane: "CPU 0", end: 4 },
+    { lane: "CPU 0", start: 5 },
+  ), true);
+  assert.equal(shouldDrawDependency(
+    { lane: "CPU 0", end: 4 },
+    { lane: "CPU 1", start: 4 },
+  ), true);
 });
 
 test("sample sequence contains about 30 steps and spans more than a minute", () => {
@@ -66,4 +81,119 @@ test("reports malformed CSV header and unclosed quoted fields", () => {
   assert.match(parseCsv('id,lane,label,duration,precedents\nx,A,"open,1,').errors.join(" "), /unclosed quoted field/);
   assert.match(parseCsv("id,lane,label,duration,precedents\nx,A,Step,1").errors.join(" "), /CSV row 2: expected 5 fields/);
   assert.match(parseCsv("id,id,lane,label,duration,precedents").errors.join(" "), /duplicate column/);
+});
+
+test("equal-width rows pack visible cards without overlap at every zoom", () => {
+  const { assignRows } = require("./app.js");
+  const items = normalizeSteps(sampleSteps).steps;
+  for (const scale of [2.6, 52, 130]) {
+    for (const lane of new Set(items.map(s => s.lane))) {
+      const placed = assignRows(items.filter(s => s.lane === lane), scale, false);
+      for (const {step, row} of placed) {
+        for (const other of placed.filter(p => p.row === row && p.step.start > step.start)) {
+          assert.ok(step.start*scale+148 <= other.step.start*scale);
+        }
+      }
+    }
+  }
+});
+
+test("routes around intervening cards and handles aligned endpoints", () => {
+  const { routeDependency } = require("./app.js");
+  const cards = [{x:20,y:20,width:60,height:40}, {x:100,y:10,width:50,height:80}];
+  for (const [start,end] of [[{x:10,y:40},{x:180,y:40}], [{x:90,y:0},{x:90,y:110}]]) {
+    const route = routeDependency(start,end,cards);
+    assert.deepEqual(route[0], start);
+    assert.deepEqual(route.at(-1),end);
+    for(let i=1;i<route.length;i++) {
+      const a=route[i-1],b=route[i];
+      assert.ok(a.x===b.x || a.y===b.y);
+      for (const c of cards) {
+        const intersects = a.x===b.x
+          ? a.x>c.x && a.x<c.x+c.width && Math.max(a.y,b.y)>c.y && Math.min(a.y,b.y)<c.y+c.height
+          : a.y>c.y && a.y<c.y+c.height && Math.max(a.x,b.x)>c.x && Math.min(a.x,b.x)<c.x+c.width;
+        assert.equal(intersects,false);
+      }
+    }
+  }
+});
+
+test("rounds bends while preserving the route endpoints", () => {
+  const { roundedRoute } = require("./app.js");
+  assert.equal(roundedRoute([{x:0,y:0},{x:20,y:0},{x:20,y:20}]),
+    "M 0 0 L 17 0 Q 20 0 20 3 L 20 20");
+  assert.equal(roundedRoute([{x:0,y:0},{x:1,y:0},{x:1,y:20}]),
+    "M 0 0 L 0.5 0 Q 1 0 1 0.5 L 1 20");
+});
+
+test("renders the complete sample in both modes across zoom levels", () => {
+  const vm = require("node:vm");
+  const fs = require("node:fs");
+  class Element {
+    constructor() { this.children=[]; this.attributes={}; this.listeners={}; this.clientWidth=1000; this.clientHeight=500; this.scrollWidth=5000; this.scrollHeight=5000; this.classList={add(){},remove(){}}; }
+    setAttribute(k,v) { this.attributes[k]=String(v); }
+    getAttribute(k) { return this.attributes[k]; }
+    append(...items) { this.children.push(...items); }
+    replaceChildren(...items) { this.children=items; }
+    addEventListener(k,fn) { this.listeners[k]=fn; }
+    scrollTo(position) { this.lastScroll=position; }
+    focus() { this.focused=true; }
+    querySelector() { return new Element(); }
+  }
+  const elements=new Map();
+  const document={querySelector(selector) { if(!elements.has(selector)) elements.set(selector,new Element()); return elements.get(selector); }, createElement() {return new Element();}, createElementNS() {return new Element();}};
+  vm.runInNewContext(fs.readFileSync(require.resolve("./app.js"),"utf8"), {document, ResizeObserver:class {observe(){}}, window:{matchMedia:() => ({matches:true})}, console});
+  for(const mode of ["#proportional-view","#sequence-view"]) {
+    elements.get(mode).listeners.click();
+    for(const zoom of [5,25,100,250]) {
+      elements.get("#zoom-level").listeners.input({target:{value:zoom}});
+      const svg=elements.get("#timeline");
+      assert.equal(svg.children.filter(c => c.children.some(child => child.attributes.class === "step-card")).length,30);
+      assert.ok(Number(svg.attributes.height)>0);
+      const paths=svg.children.flatMap(c => c.children).filter(c => c.attributes.class === "dependency-line");
+      assert.ok(paths.length>0);
+      assert.ok(paths.every(p => !/NaN|Infinity/.test(p.attributes.d)));
+      const firstCard = svg.children.flatMap(c => c.children).find(c => c.attributes.class === "step-card");
+      const firstPorts = paths.filter(p => p.children.some(c => c.textContent.includes("(power-good)")))
+        .map(p => Number(p.attributes.d.split(" ")[2])).sort((a,b) => a-b);
+      assert.ok(firstPorts.length >= 5);
+      const top=Number(firstCard.attributes.y), height=Number(firstCard.attributes.height);
+      assert.ok(Math.abs((firstPorts[0]-top) - (top+height-firstPorts.at(-1))) < 1e-8, "visible source ports must have symmetric margins");
+      const gap=firstPorts[1]-firstPorts[0];
+      for(let i=2;i<firstPorts.length;i++) assert.ok(Math.abs(firstPorts[i]-firstPorts[i-1]-gap)<1e-8, "visible source ports must be evenly spaced");
+      const cards=svg.children.flatMap(c => c.children).filter(c => c.attributes.class === "step-card").map(c => Object.fromEntries(["x","y","width","height"].map(k => [k,Number(c.attributes[k])])));
+      for(const path of paths) {
+        const commands=[...path.attributes.d.matchAll(/([MLQ])\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)(?:\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?))?/gi)];
+        let previous=null;
+        for(const [,type,x,y,x2,y2] of commands) {
+          const control={x:Number(x),y:Number(y)};
+          const end=type==="Q" ? {x:Number(x2),y:Number(y2)} : control;
+          if(previous) for(let i=1;i<20;i++) {
+            const t=i/20;
+            const point=type==="Q"
+              ? {x:(1-t)**2*previous.x+2*(1-t)*t*control.x+t*t*end.x,y:(1-t)**2*previous.y+2*(1-t)*t*control.y+t*t*end.y}
+              : {x:previous.x+(end.x-previous.x)*t,y:previous.y+(end.y-previous.y)*t};
+            for(const c of cards) assert.equal(point.x>c.x+1e-8 && point.x<c.x+c.width-1e-8 && point.y>c.y+1e-8 && point.y<c.y+c.height-1e-8,false,"connector must not cross a card");
+          }
+          previous=end;
+        }
+      }
+      const sources=svg.children.filter(c => c.attributes.class === "dependency-source-port");
+      const targets=svg.children.filter(c => c.attributes.class === "dependency-destination-port");
+      assert.equal(sources.length, paths.length);
+      assert.equal(targets.length, paths.length);
+      for(const [source,target] of sources.map((source,i) => [source,targets[i]])) {
+        assert.match(source.attributes.d,/\bA\b/);
+        assert.match(target.attributes.d,/\bA\b/);
+        assert.match(source.children[0].textContent,/Next step:/);
+        assert.match(target.children[0].textContent,/Precedent:/);
+      }
+      const source=sources[0], target=targets[0];
+      source.listeners.click();
+      assert.equal(target.focused,true);
+      assert.ok(elements.get(".diagram-scroll").lastScroll);
+      target.listeners.click();
+      assert.equal(source.focused,true);
+    }
+  }
 });

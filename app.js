@@ -2,7 +2,6 @@
   "use strict";
 
   const CSV_COLUMNS = ["id", "lane", "label", "duration", "precedents"];
-  const ARROW_LENGTH = 9;
   const COLORS = [
     ["#e5f3f0", "#8fc6b9"],
     ["#fff0dc", "#efc185"],
@@ -197,7 +196,77 @@
     return `${rows.join("\r\n")}\r\n`;
   }
 
-  const api = { normalizeSteps, parseCsv, toCsv, sampleSteps: SAMPLE_STEPS };
+  function shouldDrawDependency(source, target) {
+    return source.lane !== target.lane || Math.abs(source.end - target.start) > 1e-9;
+  }
+
+  // Route on an obstacle-boundary grid. Every segment stays outside card interiors.
+  function routeDependency(start, end, cards) {
+    const xs = [...new Set([start.x, end.x, ...cards.flatMap(c => [c.x - 3, c.x + c.width + 3])])].sort((a,b) => a-b);
+    const ys = [...new Set([start.y, end.y, ...cards.flatMap(c => [c.y - 6, c.y + c.height + 6])])].sort((a,b) => a-b);
+    const clear = (a,b) => !cards.some(c => a.x === b.x
+      ? a.x > c.x && a.x < c.x+c.width && Math.max(a.y,b.y)>c.y && Math.min(a.y,b.y)<c.y+c.height
+      : a.y > c.y && a.y < c.y+c.height && Math.max(a.x,b.x)>c.x && Math.min(a.x,b.x)<c.x+c.width);
+    const key = (x,y) => y*xs.length+x;
+    const first = key(xs.indexOf(start.x),ys.indexOf(start.y));
+    const last = key(xs.indexOf(end.x),ys.indexOf(end.y));
+    const queue = [first], previous = new Map([[first,null]]);
+    for (let i=0; i<queue.length && !previous.has(last); i++) {
+      const current=queue[i], x=current%xs.length, y=Math.floor(current/xs.length);
+      // Favor progress toward the destination, keeping routes deterministic.
+      const neighbors=[[x+1,y],[x-1,y],[x,y+1],[x,y-1]].filter(([nx,ny]) => nx>=0 && nx<xs.length && ny>=0 && ny<ys.length)
+        .sort(([ax,ay],[bx,by]) => Math.abs(xs[ax]-end.x)+Math.abs(ys[ay]-end.y)-Math.abs(xs[bx]-end.x)-Math.abs(ys[by]-end.y));
+      for (const [nx,ny] of neighbors) {
+        const next=key(nx,ny);
+        if (!previous.has(next) && clear({x:xs[x],y:ys[y]},{x:xs[nx],y:ys[ny]})) { previous.set(next,current); queue.push(next); }
+      }
+    }
+    if (!previous.has(last)) throw new Error("Cannot route dependency between card edges.");
+    const points=[];
+    for(let k=last; k!==null; k=previous.get(k)) points.push({x:xs[k%xs.length],y:ys[Math.floor(k/xs.length)]});
+    points.reverse();
+    return points.filter((p,i) => !i || i===points.length-1 ||
+      !((points[i-1].x===p.x && p.x===points[i+1].x) || (points[i-1].y===p.y && p.y===points[i+1].y)));
+  }
+
+  function roundedRoute(points, radius = 3) {
+    if (!points.length) return "";
+    const commands = [`M ${points[0].x} ${points[0].y}`];
+    for (let i = 1; i < points.length - 1; i += 1) {
+      const before = points[i - 1];
+      const corner = points[i];
+      const after = points[i + 1];
+      const incoming = Math.hypot(corner.x - before.x, corner.y - before.y);
+      const outgoing = Math.hypot(after.x - corner.x, after.y - corner.y);
+      const bend = Math.min(radius, incoming / 2, outgoing / 2);
+      if (bend === 0) continue;
+      const entry = {
+        x: corner.x - (corner.x - before.x) / incoming * bend,
+        y: corner.y - (corner.y - before.y) / incoming * bend,
+      };
+      const exit = {
+        x: corner.x + (after.x - corner.x) / outgoing * bend,
+        y: corner.y + (after.y - corner.y) / outgoing * bend,
+      };
+      commands.push(`L ${entry.x} ${entry.y}`, `Q ${corner.x} ${corner.y} ${exit.x} ${exit.y}`);
+    }
+    const last = points[points.length - 1];
+    commands.push(`L ${last.x} ${last.y}`);
+    return commands.join(" ");
+  }
+
+  function assignRows(items, scale, proportional, fixedWidth = 148) {
+    const ends=[];
+    return [...items].sort((a,b) => a.start-b.start || a.index-b.index).map(step => {
+      const x=step.start*scale;
+      let row=ends.findIndex(end => end <= x+1e-9);
+      if(row<0) row=ends.length;
+      ends[row]=proportional ? step.end*scale : x+fixedWidth+10;
+      return {step,row};
+    });
+  }
+
+  const api = { normalizeSteps, parseCsv, toCsv, shouldDrawDependency, assignRows, routeDependency, roundedRoute, sampleSteps: SAMPLE_STEPS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   global.StartupSequence = api;
 
@@ -266,6 +335,30 @@
     return element;
   }
 
+  function endpointPort(x, y, radius, side, tooltip) {
+    const port = svgElement("path", {
+      d: `M ${x} ${y - radius} A ${radius} ${radius} 0 0 ${side === "source" ? 0 : 1} ${x} ${y + radius} Z`,
+      class: `dependency-${side === "source" ? "source" : "destination"}-port`,
+      tabindex: 0,
+      role: "button",
+      "aria-label": tooltip,
+    });
+    port.append(svgElement("title", {}, tooltip));
+    return port;
+  }
+
+  function linkEndpoint(port, counterpart, x, y, edge) {
+    const jump = () => jumpToArrowEnd(counterpart, x, y);
+    port.addEventListener("click", jump);
+    port.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        jump();
+      }
+    });
+    bindEdgeHighlight(port, edge);
+  }
+
   function renderDiagram(scheduled) {
     timeline.replaceChildren();
     const lanes = [...new Set(scheduled.map((step) => step.lane))];
@@ -295,18 +388,11 @@
       const laneSteps = scheduled
         .filter((step) => step.lane === lane)
         .sort((a, b) => a.start - b.start || a.index - b.index);
-      const rowEnds = [];
       const rowItems = [];
-      laneSteps.forEach((step) => {
-        const x = left + step.start * scale;
-        const width = proportional ? step.duration * scale : fixedWidth;
-        const slotEnd = x + width + 10;
-        let row = rowEnds.findIndex((end) => end <= x);
-        if (row === -1) row = rowEnds.length;
-        rowEnds[row] = slotEnd;
+      for (const {step, row} of assignRows(laneSteps, scale, proportional, fixedWidth)) {
         if (!rowItems[row]) rowItems[row] = [];
         rowItems[row].push(step);
-      });
+      }
       const rowHeights = rowItems.map((items) => Math.max(...items.map((step) => cardHeights.get(step.id))));
       const rowGap = 12;
       const contentHeight = rowHeights.reduce((total, height) => total + height, 0) + Math.max(0, rowHeights.length - 1) * rowGap;
@@ -315,15 +401,16 @@
       rowItems.forEach((items, row) => {
         const rowHeight = rowHeights[row];
         for (const step of items) {
-          const x = left + step.start * scale;
-          const width = proportional ? step.duration * scale : fixedWidth;
+          const inset = proportional ? Math.min(3, step.duration * scale / 4) : 0;
+          const x = left + step.start * scale + inset;
+          const width = proportional ? step.duration * scale - 2 * inset : fixedWidth;
           const cardHeight = cardHeights.get(step.id);
           cardPositions.set(step.id, {
             x,
             y: rowTop + (rowHeight - cardHeight) / 2,
             width,
             height: cardHeight,
-            actualEndX: x + step.duration * scale,
+            row,
           });
         }
         rowTop += rowHeight + rowGap;
@@ -332,9 +419,14 @@
       nextY += height;
     }
 
+    const defs = svgElement("defs");
+    const marker = svgElement("marker", { id: "arrowhead", viewBox: "0 0 8 8", refX: 8, refY: 4, markerWidth: 6, markerHeight: 6, orient: "auto", markerUnits: "userSpaceOnUse" });
+    marker.append(svgElement("path", { d: "M 0 0 L 8 4 L 0 8 Z", fill: "context-stroke" }));
+    defs.append(marker);
+    timeline.append(defs);
     const axis = svgElement("g");
     axis.append(svgElement("text", { x: 18, y: 22, class: "axis-label" }, "COMPONENT"));
-    axis.append(svgElement("text", { x: left, y: 22, class: "axis-label" }, "TIME →"));
+    axis.append(svgElement("text", { x: left, y: 22, class: "axis-label" }, "TIME (s) →"));
     axis.append(svgElement("line", { x1: left, y1: axisHeight, x2: chartRight, y2: axisHeight, class: "axis-rule" }));
     const tickStep = chooseTickStep(scale);
     for (let time = 0; time <= maxTime; time += tickStep) {
@@ -346,7 +438,6 @@
       const x = left + maxTime * scale;
       axis.append(svgElement("text", { x, y: 34, class: "tick-label", "text-anchor": "middle" }, formatNumber(maxTime)));
     }
-    timeline.append(axis);
 
     lanes.forEach((lane, index) => {
       const { top, height } = laneRows.get(lane);
@@ -359,29 +450,41 @@
       timeline.append(laneText);
     });
 
-    const dependentOrder = new Map(scheduled.map((step, index) => [step.id, index]));
+    timeline.append(axis);
+
+    const byId = new Map(scheduled.map(step => [step.id, step]));
+    const visibleSources = new Map(scheduled.map(step => [step.id, []]));
+    const visibleTargets = new Map(scheduled.map(step => [step.id, []]));
+    for (const target of scheduled) {
+      for (const sourceId of target.precedents) {
+        const source = byId.get(sourceId);
+        if (!shouldDrawDependency(source, target) && cardPositions.get(sourceId).row === cardPositions.get(target.id).row) continue;
+        visibleSources.get(target.id).push(sourceId);
+        visibleTargets.get(sourceId).push(target.id);
+      }
+    }
+    // Allocate ports only to rendered edges, ordered by the other card's position.
+    const comparePosition = (a, b) => {
+      const pa = cardPositions.get(a), pb = cardPositions.get(b);
+      return (pa.y + pa.height / 2) - (pb.y + pb.height / 2) || pa.x - pb.x || byId.get(a).index - byId.get(b).index;
+    };
+    for (const ids of [...visibleSources.values(), ...visibleTargets.values()]) ids.sort(comparePosition);
     const endpointPorts = [];
     for (const targetStep of scheduled) {
       const targetPosition = cardPositions.get(targetStep.id);
-      const sources = [...targetStep.precedents].sort((a, b) => dependentOrder.get(a) - dependentOrder.get(b));
+      const sources = visibleSources.get(targetStep.id);
       sources.forEach((sourceId, targetIndex) => {
-        const sourceStep = scheduled.find((step) => step.id === sourceId);
+        const sourceStep = byId.get(sourceId);
         const sourcePosition = cardPositions.get(sourceId);
-        const sourceTargets = outgoing.get(sourceId);
+        const sourceTargets = visibleTargets.get(sourceId);
         const sourceIndex = sourceTargets.indexOf(targetStep.id);
-        const startX = proportional ? sourcePosition.x + sourcePosition.width : sourcePosition.actualEndX;
+        const startX = sourcePosition.x + sourcePosition.width;
         const startY = sourcePosition.y + spreadPort(sourceIndex, sourceTargets.length, sourcePosition.height);
         const endX = targetPosition.x;
         const endY = targetPosition.y + spreadPort(targetIndex, sources.length, targetPosition.height);
-        const lineEndX = endX - ARROW_LENGTH;
-        const distanceX = lineEndX - startX;
-        const control1X = distanceX >= 0
-          ? startX + Math.max(12, distanceX / 2)
-          : startX + Math.max(60, Math.abs(distanceX) * 1.5);
-        const control2X = lineEndX - (distanceX >= 0 ? Math.min(10, Math.max(6, distanceX / 4)) : 16);
-        const path = svgElement("path", {
-          d: `M ${startX} ${startY} C ${control1X} ${startY}, ${control2X} ${endY}, ${lineEndX} ${endY}`,
-        });
+        const routed = routeDependency({x:startX+1,y:startY}, {x:endX-1,y:endY}, [...cardPositions.values()]);
+        const points = [{x:startX,y:startY}, ...routed, {x:endX,y:endY}];
+        const pathData = roundedRoute(points);
         const port = {
           sourceStep,
           targetStep,
@@ -389,10 +492,10 @@
           startY,
           endX,
           endY,
-          pathData: path.getAttribute("d"),
+          pathData,
         };
         const edge = svgElement("g", { class: "dependency-edge" });
-        const visibleLine = svgElement("path", { d: port.pathData, class: "dependency-line" });
+        const visibleLine = svgElement("path", { d: port.pathData, class: "dependency-line", "marker-end": "url(#arrowhead)" });
         visibleLine.append(svgElement("title", {}, `Precedent: ${sourceStep.label} (${sourceStep.id})`));
         edge.append(visibleLine);
         const hitArea = svgElement("path", {
@@ -414,67 +517,43 @@
       const position = cardPositions.get(step.id);
       const [fill, stroke] = laneColors.get(step.lane);
       const group = svgElement("g");
+      group.append(svgElement("title", {}, `${step.label} (${step.id}) · ${formatNumber(step.start)}–${formatNumber(step.end)} s · duration ${formatNumber(step.duration)} seconds`));
+      const clipId = `card-label-${step.index}`;
+      const clip = svgElement("clipPath", {id: clipId});
+      clip.append(svgElement("rect", {x: position.x + 6, y: position.y, width: Math.max(0,position.width-12), height: position.height}));
+      defs.append(clip);
       const rect = svgElement("rect", {
         x: position.x, y: position.y, width: position.width, height: position.height,
         rx: 5, fill, stroke, class: "step-card",
       });
-      rect.append(svgElement("title", {}, `${step.label} (${step.id}) · ${formatNumber(step.duration)} time units`));
+      rect.append(svgElement("title", {}, `${step.label} (${step.id}) · ${formatNumber(step.duration)} seconds`));
       group.append(rect);
       const label = svgElement("text", {
         x: position.x + 9,
         y: position.y + position.height / 2 + (position.height > 43 ? -2 : 4),
-        class: "step-card-text",
+        class: "step-card-text", "clip-path": `url(#${clipId})`,
       }, truncate(step.label, proportional ? Math.floor(position.width / 7) : 19));
       group.append(label);
       if (position.width > 58 && position.height > 43) {
         group.append(svgElement("text", {
-          x: position.x + 9, y: position.y + position.height / 2 + 13, class: "step-id-text",
+          x: position.x + 9, y: position.y + position.height / 2 + 13, class: "step-id-text", "clip-path": `url(#${clipId})`,
         }, truncate(step.id, Math.floor((position.width - 18) / 5.5))));
       }
       timeline.append(group);
     }
 
     for (const port of endpointPorts) {
-      const arrowhead = svgElement("path", {
-        d: `M ${port.endX} ${port.endY} L ${port.endX - ARROW_LENGTH} ${port.endY - 5} L ${port.endX - ARROW_LENGTH} ${port.endY + 5} Z`,
-        class: "dependency-arrowhead",
-      });
-      arrowhead.append(svgElement("title", {}, `Precedent: ${port.sourceStep.label} (${port.sourceStep.id})`));
-      timeline.append(arrowhead);
-      const base = svgElement("circle", {
-        cx: port.startX,
-        cy: port.startY,
-        r: 3.5,
-        class: "dependency-source-port",
-        tabindex: 0,
-        "aria-label": `Next step: ${port.targetStep.label} (${port.targetStep.id})`,
-      });
-      base.append(svgElement("title", {}, `Next step: ${port.targetStep.label} (${port.targetStep.id})`));
-      timeline.append(base);
-      const arrowTip = svgElement("circle", {
-        cx: port.endX,
-        cy: port.endY,
-        r: 4.5,
-        class: "dependency-target-hit",
-        tabindex: 0,
-        role: "button",
-        "aria-label": `Precedent: ${port.sourceStep.label} (${port.sourceStep.id})`,
-      });
-      arrowTip.append(svgElement("title", {}, `Precedent: ${port.sourceStep.label} (${port.sourceStep.id})`));
-      arrowTip.addEventListener("click", () => jumpToArrowEnd(arrowTip, port.endX, port.endY));
-      timeline.append(arrowTip);
-
-      base.setAttribute("role", "button");
-      base.addEventListener("click", () => jumpToArrowEnd(arrowTip, port.endX, port.endY));
-      base.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          jumpToArrowEnd(arrowTip, port.endX, port.endY);
-        }
-      });
-      bindEdgeHighlight(base, port.edge);
-      bindEdgeHighlight(arrowhead, port.edge);
-      bindEdgeHighlight(arrowTip, port.edge);
+      const sourcePosition = cardPositions.get(port.sourceStep.id);
+      const sourceRadius = Math.min(4, sourcePosition.width / 2, sourcePosition.height / 2);
+      const targetPosition = cardPositions.get(port.targetStep.id);
+      const targetRadius = Math.min(4.5, targetPosition.width / 2, targetPosition.height / 2);
+      const base = endpointPort(port.startX, port.startY, sourceRadius, "source",
+        `Next step: ${port.targetStep.label} (${port.targetStep.id})`);
+      const tip = endpointPort(port.endX, port.endY, targetRadius, "destination",
+        `Precedent: ${port.sourceStep.label} (${port.sourceStep.id})`);
+      linkEndpoint(base, tip, port.endX, port.endY, port.edge);
+      linkEndpoint(tip, base, port.startX, port.startY, port.edge);
+      timeline.append(base, tip);
     }
 
     timeline.setAttribute("width", chartRight);
@@ -557,7 +636,7 @@
     const scheduled = result.steps;
     renderRows(scheduled);
     $("#empty-diagram").hidden = scheduled.length > 0;
-    $("#total-time").textContent = `Critical path · ${formatNumber(Math.max(0, ...scheduled.map((step) => step.end)))} time units`;
+    $("#total-time").textContent = `Critical path · ${formatNumber(Math.max(0, ...scheduled.map((step) => step.end)))} seconds`;
     renderDiagram(scheduled);
   }
 
@@ -574,7 +653,8 @@
   function setZoom(percent, fit = false) {
     const scroller = $(".diagram-scroll");
     const previousScale = baseScale * zoomPercent / 100;
-    const focusedTime = Math.max(0, (scroller.scrollLeft + 126) / previousScale);
+    const centerOffset = scroller.clientWidth / 2 - 126;
+    const focusedTime = Math.max(0, (scroller.scrollLeft + centerOffset) / previousScale);
     const roundedPercent = fit ? Math.floor(percent / 5) * 5 : Math.round(percent / 5) * 5;
     zoomPercent = Math.min(250, Math.max(5, roundedPercent));
     $("#zoom-level").value = String(zoomPercent);
@@ -583,7 +663,7 @@
     if (fit) {
       scroller.scrollLeft = 0;
     } else {
-      scroller.scrollLeft = Math.max(0, focusedTime * baseScale * zoomPercent / 100 - 126);
+      scroller.scrollLeft = Math.max(0, focusedTime * baseScale * zoomPercent / 100 - centerOffset);
     }
   }
 
@@ -642,7 +722,7 @@
     proportional = false;
     $("#proportional-view").setAttribute("aria-pressed", "false");
     $("#sequence-view").setAttribute("aria-pressed", "true");
-    $("#view-description").textContent = "Equal-width blocks; horizontal position still reflects scheduled start time.";
+    $("#view-description").textContent = "Equal-width blocks at scheduled start times; overlapping cards use separate rows.";
     render();
   });
   $("#zoom-level").addEventListener("input", (event) => setZoom(Number(event.target.value)));
@@ -693,5 +773,6 @@
     setMessage("CSV exported.");
   });
 
+  new ResizeObserver(() => renderDiagram(normalizeSteps(steps).steps)).observe($(".diagram-scroll"));
   render();
 })(globalThis);

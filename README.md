@@ -18,9 +18,10 @@ load-files,Storage,Load startup files,4,rom-init
 decrypt-image,Security,Decrypt firmware,2,key-exchange;load-files
 ```
 
-IDs must be unique. Durations must be positive numbers in a consistent unit throughout the file. Separate multiple precedent IDs with semicolons. Labels and other fields may be quoted using standard CSV double-quote escaping.
+IDs must be unique. Durations must be positive numbers in seconds. Separate multiple precedent IDs with semicolons. Labels and other fields may be quoted using standard CSV double-quote escaping.
 
-The timeline places each step at the earliest time its precedents allow; independent steps can run in parallel. Step cards are vertically centered within their swimlane rows, with crowded rows stacked and centered as a group. Dependency arrows spread across the source and target edges to reduce overlap; hover an arrowhead to see its prerequisite, or its source dot to see the next step. Proportional mode scales block width to duration. Equal-width mode keeps the same scheduled positions while rendering all blocks at a fixed width. Use the zoom slider or +/- buttons to inspect the timeline, and Fit to see its full duration at once; the diagram also scrolls horizontally and vertically when needed. Missing references, duplicate IDs, malformed rows, invalid durations, and dependency cycles are reported in the UI.
+The timeline places each step at the earliest time its precedents allow; independent steps can run in parallel. Proportional blocks represent duration, with a small visual gap separating consecutive steps. Equal-width blocks retain scheduled start positions and use additional rows whenever their visible cards overlap. Same-lane dependencies are implicit only when consecutive steps share a row. Other dependencies use rounded connectors routed around cards, with arrowheads indicating direction. Both ends have visible semicircle connectors: hover or focus one to inspect its linked step, or activate it to jump to the other end. Labels are clipped within cards; hover a card for its full label, ID, start, finish, and duration. Use zoom or Fit to inspect the timeline. Missing references, duplicate IDs, malformed rows, invalid durations, and dependency cycles are reported in the UI.
+
 
 ## Tests
 
