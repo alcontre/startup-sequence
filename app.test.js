@@ -130,7 +130,11 @@ test("renders the complete sample in both modes across zoom levels", () => {
   const vm = require("node:vm");
   const fs = require("node:fs");
   class Element {
-    constructor() { this.children=[]; this.attributes={}; this.listeners={}; this.clientWidth=1000; this.clientHeight=500; this.scrollWidth=5000; this.scrollHeight=5000; this.classList={add(){},remove(){}}; }
+    constructor() {
+      this.children=[]; this.attributes={}; this.listeners={}; this.clientWidth=1000; this.clientHeight=500; this.scrollWidth=5000; this.scrollHeight=5000;
+      const classes=new Set();
+      this.classList={add:name => classes.add(name),remove:name => classes.delete(name),contains:name => classes.has(name)};
+    }
     setAttribute(k,v) { this.attributes[k]=String(v); }
     getAttribute(k) { return this.attributes[k]; }
     append(...items) { this.children.push(...items); }
@@ -150,7 +154,8 @@ test("renders the complete sample in both modes across zoom levels", () => {
       const svg=elements.get("#timeline");
       assert.equal(svg.children.filter(c => c.children.some(child => child.attributes.class === "step-card")).length,30);
       assert.ok(Number(svg.attributes.height)>0);
-      const paths=svg.children.flatMap(c => c.children).filter(c => c.attributes.class === "dependency-line");
+      const descendants=(node) => node.children.flatMap(child => [child, ...descendants(child)]);
+      const paths=descendants(svg).filter(c => c.attributes.class === "dependency-line");
       assert.ok(paths.length>0);
       assert.ok(paths.every(p => !/NaN|Infinity/.test(p.attributes.d)));
       const firstCard = svg.children.flatMap(c => c.children).find(c => c.attributes.class === "step-card");
@@ -161,21 +166,13 @@ test("renders the complete sample in both modes across zoom levels", () => {
       assert.ok(Math.abs((firstPorts[0]-top) - (top+height-firstPorts.at(-1))) < 1e-8, "visible source ports must have symmetric margins");
       const gap=firstPorts[1]-firstPorts[0];
       for(let i=2;i<firstPorts.length;i++) assert.ok(Math.abs(firstPorts[i]-firstPorts[i-1]-gap)<1e-8, "visible source ports must be evenly spaced");
-      const cards=svg.children.flatMap(c => c.children).filter(c => c.attributes.class === "step-card").map(c => Object.fromEntries(["x","y","width","height"].map(k => [k,Number(c.attributes[k])])));
       for(const path of paths) {
         const commands=[...path.attributes.d.matchAll(/([MLQ])\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)(?:\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?))?/gi)];
-        let previous=null;
+        let previousX=-Infinity;
         for(const [,type,x,y,x2,y2] of commands) {
-          const control={x:Number(x),y:Number(y)};
-          const end=type==="Q" ? {x:Number(x2),y:Number(y2)} : control;
-          if(previous) for(let i=1;i<20;i++) {
-            const t=i/20;
-            const point=type==="Q"
-              ? {x:(1-t)**2*previous.x+2*(1-t)*t*control.x+t*t*end.x,y:(1-t)**2*previous.y+2*(1-t)*t*control.y+t*t*end.y}
-              : {x:previous.x+(end.x-previous.x)*t,y:previous.y+(end.y-previous.y)*t};
-            for(const c of cards) assert.equal(point.x>c.x+1e-8 && point.x<c.x+c.width-1e-8 && point.y>c.y+1e-8 && point.y<c.y+c.height-1e-8,false,"connector must not cross a card");
-          }
-          previous=end;
+          assert.ok(Number(x) >= previousX - 1e-8, "connector must not move backward in time");
+          if(type==="Q") assert.ok(Number(x2) >= Number(x) - 1e-8, "rounded bend must not move backward in time");
+          previousX=type==="Q" ? Number(x2) : Number(x);
         }
       }
       const sources=svg.children.filter(c => c.attributes.class === "dependency-source-port");
@@ -189,6 +186,24 @@ test("renders the complete sample in both modes across zoom levels", () => {
         assert.match(target.children[0].textContent,/Precedent:/);
       }
       const source=sources[0], target=targets[0];
+      const edge=descendants(svg).find(c => c.attributes.class === "dependency-edge");
+      const foreground=descendants(svg).find(c => c.attributes.class === "dependency-foreground-line");
+      const foregroundLayer=svg.children.findIndex(c => c.attributes.class === "dependency-foreground");
+      const firstCardGroup=svg.children.findIndex(c => c.children.some(child => child.attributes.class === "step-card"));
+      const firstPort=svg.children.findIndex(c => c.attributes.class === "dependency-source-port");
+      assert.ok(firstCardGroup < foregroundLayer && foregroundLayer < firstPort, "highlighted routes must appear above cards and below ports");
+      edge.listeners.pointerenter();
+      assert.equal(source.classList.contains("is-highlighted"),true);
+      assert.equal(target.classList.contains("is-highlighted"),true);
+      assert.equal(foreground.classList.contains("is-highlighted"),true);
+      edge.listeners.pointerleave();
+      assert.equal(source.classList.contains("is-highlighted"),false);
+      assert.equal(target.classList.contains("is-highlighted"),false);
+      assert.equal(foreground.classList.contains("is-highlighted"),false);
+      source.listeners.pointerenter();
+      assert.equal(edge.classList.contains("is-highlighted"),true);
+      assert.equal(target.classList.contains("is-highlighted"),true);
+      source.listeners.pointerleave();
       source.listeners.click();
       assert.equal(target.focused,true);
       assert.ok(elements.get(".diagram-scroll").lastScroll);

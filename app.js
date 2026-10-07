@@ -214,7 +214,7 @@
     for (let i=0; i<queue.length && !previous.has(last); i++) {
       const current=queue[i], x=current%xs.length, y=Math.floor(current/xs.length);
       // Favor progress toward the destination, keeping routes deterministic.
-      const neighbors=[[x+1,y],[x-1,y],[x,y+1],[x,y-1]].filter(([nx,ny]) => nx>=0 && nx<xs.length && ny>=0 && ny<ys.length)
+      const neighbors=[[x+1,y],[x,y+1],[x,y-1]].filter(([nx,ny]) => nx>=0 && nx<xs.length && ny>=0 && ny<ys.length)
         .sort(([ax,ay],[bx,by]) => Math.abs(xs[ax]-end.x)+Math.abs(ys[ay]-end.y)-Math.abs(xs[bx]-end.x)-Math.abs(ys[by]-end.y));
       for (const [nx,ny] of neighbors) {
         const next=key(nx,ny);
@@ -337,7 +337,7 @@
 
   function endpointPort(x, y, radius, side, tooltip) {
     const port = svgElement("path", {
-      d: `M ${x} ${y - radius} A ${radius} ${radius} 0 0 ${side === "source" ? 0 : 1} ${x} ${y + radius} Z`,
+      d: `M ${x} ${y - radius} A ${radius} ${radius} 0 0 ${side === "destination-left" ? 1 : 0} ${x} ${y + radius} Z`,
       class: `dependency-${side === "source" ? "source" : "destination"}-port`,
       tabindex: 0,
       role: "button",
@@ -420,9 +420,6 @@
     }
 
     const defs = svgElement("defs");
-    const marker = svgElement("marker", { id: "arrowhead", viewBox: "0 0 8 8", refX: 8, refY: 4, markerWidth: 6, markerHeight: 6, orient: "auto", markerUnits: "userSpaceOnUse" });
-    marker.append(svgElement("path", { d: "M 0 0 L 8 4 L 0 8 Z", fill: "context-stroke" }));
-    defs.append(marker);
     timeline.append(defs);
     const axis = svgElement("g");
     axis.append(svgElement("text", { x: 18, y: 22, class: "axis-label" }, "COMPONENT"));
@@ -470,6 +467,9 @@
     };
     for (const ids of [...visibleSources.values(), ...visibleTargets.values()]) ids.sort(comparePosition);
     const endpointPorts = [];
+    const backgroundEdges = svgElement("g", { class: "dependency-background" });
+    const foregroundEdges = svgElement("g", { class: "dependency-foreground" });
+    timeline.append(backgroundEdges);
     for (const targetStep of scheduled) {
       const targetPosition = cardPositions.get(targetStep.id);
       const sources = visibleSources.get(targetStep.id);
@@ -480,9 +480,21 @@
         const sourceIndex = sourceTargets.indexOf(targetStep.id);
         const startX = sourcePosition.x + sourcePosition.width;
         const startY = sourcePosition.y + spreadPort(sourceIndex, sourceTargets.length, sourcePosition.height);
-        const endX = targetPosition.x;
+        const endOnRight = !proportional && sourcePosition.x + sourcePosition.width >= targetPosition.x;
+        const endX = targetPosition.x + (endOnRight ? targetPosition.width : 0);
         const endY = targetPosition.y + spreadPort(targetIndex, sources.length, targetPosition.height);
-        const routed = routeDependency({x:startX+1,y:startY}, {x:endX-1,y:endY}, [...cardPositions.values()]);
+        const offset = Math.min(1, (endX - startX) / 3);
+        const obstacles = [...cardPositions.entries()]
+          .filter(([id]) => !endOnRight || id !== targetStep.id)
+          .map(([, position]) => position);
+        let routed;
+        try {
+          routed = routeDependency({x:startX+offset,y:startY}, {x:endX-offset,y:endY}, obstacles);
+        } catch (error) {
+          // A card can seal every forward corridor. Keep the route moving forward
+          // and let that card cover the line until the connection is highlighted.
+          routed = routeDependency({x:startX+offset,y:startY}, {x:endX-offset,y:endY}, []);
+        }
         const points = [{x:startX,y:startY}, ...routed, {x:endX,y:endY}];
         const pathData = roundedRoute(points);
         const port = {
@@ -492,10 +504,11 @@
           startY,
           endX,
           endY,
+          endOnRight,
           pathData,
         };
         const edge = svgElement("g", { class: "dependency-edge" });
-        const visibleLine = svgElement("path", { d: port.pathData, class: "dependency-line", "marker-end": "url(#arrowhead)" });
+        const visibleLine = svgElement("path", { d: port.pathData, class: "dependency-line" });
         visibleLine.append(svgElement("title", {}, `Precedent: ${sourceStep.label} (${sourceStep.id})`));
         edge.append(visibleLine);
         const hitArea = svgElement("path", {
@@ -506,7 +519,10 @@
         hitArea.append(svgElement("title", {}, `Precedent: ${sourceStep.label} (${sourceStep.id})`));
         edge.append(hitArea);
         bindEdgeHighlight(edge, edge);
-        timeline.append(edge);
+        backgroundEdges.append(edge);
+        const foregroundLine = svgElement("path", { d: port.pathData, class: "dependency-foreground-line" });
+        foregroundEdges.append(foregroundLine);
+        edge.foregroundLine = foregroundLine;
         port.edge = edge;
         endpointPorts.push(port);
       });
@@ -542,6 +558,8 @@
       timeline.append(group);
     }
 
+    timeline.append(foregroundEdges);
+
     for (const port of endpointPorts) {
       const sourcePosition = cardPositions.get(port.sourceStep.id);
       const sourceRadius = Math.min(4, sourcePosition.width / 2, sourcePosition.height / 2);
@@ -549,10 +567,11 @@
       const targetRadius = Math.min(4.5, targetPosition.width / 2, targetPosition.height / 2);
       const base = endpointPort(port.startX, port.startY, sourceRadius, "source",
         `Next step: ${port.targetStep.label} (${port.targetStep.id})`);
-      const tip = endpointPort(port.endX, port.endY, targetRadius, "destination",
+      const tip = endpointPort(port.endX, port.endY, targetRadius, port.endOnRight ? "destination-right" : "destination-left",
         `Precedent: ${port.sourceStep.label} (${port.sourceStep.id})`);
       linkEndpoint(base, tip, port.endX, port.endY, port.edge);
       linkEndpoint(tip, base, port.startX, port.startY, port.edge);
+      port.edge.endpointPorts = [base, tip];
       timeline.append(base, tip);
     }
 
@@ -568,10 +587,16 @@
   }
 
   function bindEdgeHighlight(element, edge) {
-    element.addEventListener("pointerenter", () => edge.classList.add("is-highlighted"));
-    element.addEventListener("pointerleave", () => edge.classList.remove("is-highlighted"));
-    element.addEventListener("focusin", () => edge.classList.add("is-highlighted"));
-    element.addEventListener("focusout", () => edge.classList.remove("is-highlighted"));
+    const setHighlighted = (highlighted) => {
+      const method = highlighted ? "add" : "remove";
+      edge.classList[method]("is-highlighted");
+      edge.foregroundLine?.classList[method]("is-highlighted");
+      for (const port of edge.endpointPorts || []) port.classList[method]("is-highlighted");
+    };
+    element.addEventListener("pointerenter", () => setHighlighted(true));
+    element.addEventListener("pointerleave", () => setHighlighted(false));
+    element.addEventListener("focusin", () => setHighlighted(true));
+    element.addEventListener("focusout", () => setHighlighted(false));
   }
 
   function jumpToArrowEnd(target, x, y) {
