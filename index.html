@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f6f8">
+    <title>Startup Sequence Visualizer</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">SYSTEM DESIGN TOOL</p>
+          <h1>Startup sequence</h1>
+          <p class="lede">Map boot tasks across components and see how their dependencies shape startup time.</p>
+        </div>
+        <div class="header-actions">
+          <label class="button button-secondary file-button" for="csv-file">Import CSV</label>
+          <input id="csv-file" type="file" accept=".csv,text/csv" hidden>
+          <button id="export-csv" class="button button-primary" type="button">Export CSV</button>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="Diagram options">
+        <div class="view-switch">
+          <span class="toolbar-label">Block sizing</span>
+          <div class="segmented-control" role="group" aria-label="Block sizing">
+            <button id="proportional-view" type="button" aria-pressed="true">Proportional</button>
+            <button id="sequence-view" type="button" aria-pressed="false">Equal width</button>
+          </div>
+        </div>
+        <p id="view-description" class="view-description">Block widths represent duration. Time runs left to right.</p>
+        <div class="toolbar-tail">
+          <div class="zoom-controls" role="group" aria-label="Timeline zoom">
+            <span class="toolbar-label">Zoom</span>
+            <button id="zoom-out" class="zoom-button" type="button" aria-label="Zoom out" title="Zoom out">−</button>
+            <input id="zoom-level" type="range" min="5" max="250" step="5" value="100" aria-label="Timeline zoom percentage">
+            <button id="zoom-in" class="zoom-button" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+            <output id="zoom-value" for="zoom-level">100%</output>
+            <button id="fit-timeline" class="fit-button" type="button" title="Fit complete timeline in view">Fit</button>
+          </div>
+          <p id="total-time" class="total-time" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="diagram-panel" aria-labelledby="diagram-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">DEPENDENCY MAP</p>
+            <h2 id="diagram-title">Startup timeline</h2>
+          </div>
+          <p class="panel-hint">Hover an arrowhead for its prerequisite; hover its source dot for the next step.</p>
+        </div>
+        <div id="messages" class="messages" role="status" aria-live="polite" hidden></div>
+        <div class="diagram-scroll" tabindex="0" aria-label="Scrollable startup timeline">
+          <svg id="timeline" role="img" aria-label="Startup steps arranged by component and time"></svg>
+          <div id="empty-diagram" class="empty-state" hidden>
+            <span class="empty-icon" aria-hidden="true">↗</span>
+            <strong>Your timeline is ready</strong>
+            <span>Add a startup step or import a CSV to begin.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="steps-panel" aria-labelledby="steps-title">
+        <div class="panel-heading steps-heading">
+          <div>
+            <p class="eyebrow">SEQUENCE DATA</p>
+            <h2 id="steps-title">Startup steps <span id="step-count" class="count-badge">0</span></h2>
+          </div>
+          <button id="clear-steps" class="text-button" type="button">Clear all</button>
+        </div>
+
+        <form id="step-form" class="step-form">
+          <div class="form-heading">
+            <h3 id="form-title">Add a step</h3>
+            <p>Use a consistent time unit for every duration.</p>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>Step ID</span>
+              <input id="step-id" name="id" required autocomplete="off" placeholder="cpu0-init">
+            </label>
+            <label>
+              <span>Component / lane</span>
+              <input id="step-lane" name="lane" required autocomplete="off" placeholder="CPU 0">
+            </label>
+            <label class="label-wide">
+              <span>Step label</span>
+              <input id="step-label" name="label" required autocomplete="off" placeholder="Initialize boot firmware">
+            </label>
+            <label>
+              <span>Duration</span>
+              <input id="step-duration" name="duration" type="number" min="0.001" step="any" required placeholder="2.5">
+            </label>
+            <label class="label-wide">
+              <span>Precedents <small>(IDs, separated by semicolons)</small></span>
+              <input id="step-precedents" name="precedents" autocomplete="off" placeholder="rom-init; key-exchange">
+            </label>
+          </div>
+          <div class="form-actions">
+            <button id="save-step" class="button button-primary" type="submit">Add step</button>
+            <button id="cancel-edit" class="button button-secondary" type="button" hidden>Cancel edit</button>
+          </div>
+        </form>
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Step</th>
+                <th scope="col">Component</th>
+                <th scope="col">Duration</th>
+                <th scope="col">Precedents</th>
+                <th scope="col"><span class="visually-hidden">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="step-rows"></tbody>
+          </table>
+          <p id="empty-table" class="table-empty">No steps yet. Add one above or import a CSV.</p>
+        </div>
+      </section>
+
+      <footer>Everything stays in this browser. Export a CSV to save or share your sequence.</footer>
+    </main>
+  </body>
+</html>
